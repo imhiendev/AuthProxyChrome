@@ -1,7 +1,7 @@
 /**
  * Proxy Authentication Extension
  * @author imhiendev
- * @version 1.0
+ * @version 1.1
  * @description Extension tự động thiết lập proxy và xác thực từ tham số URL
  * @copyright 2025 imhiendev
  */
@@ -30,60 +30,68 @@ function getProxyFromURL() {
     });
 }
 
+// Thêm biến để theo dõi trạng thái proxy
+let currentProxyString = null;
+let isSettingProxy = false;
+
 // Thiết lập proxy
 function setProxy(proxyString) {
-    if (!proxyString || !proxyString.includes(":")) {
-        console.log("Invalid proxy string:", proxyString);
+    if (!proxyString || !proxyString.includes(":") || isSettingProxy) {
+        console.log("Invalid proxy string or proxy is being set:", proxyString);
         return;
     }
 
-    // Đảm bảo xóa proxy cũ trước khi thiết lập proxy mới
-    disableProxy().then(() => {
-        const [host, port, username, password] = proxyString.split(":");
-        const config = {
-            mode: "fixed_servers",
-            rules: {
-                singleProxy: {
-                    scheme: "http",
-                    host: host,
-                    port: parseInt(port),
-                },
-                bypassList: ["localhost"],
+    isSettingProxy = true;
+    
+    const [host, port, username, password] = proxyString.split(":");
+    const config = {
+        mode: "fixed_servers",
+        rules: {
+            singleProxy: {
+                scheme: "http",
+                host: host,
+                port: parseInt(port),
+            },
+            bypassList: ["localhost", "127.0.0.1"],
+        },
+    };
+
+    // Thiết lập proxy auth listener trước
+    proxyAuthListener = (details) => {
+        return {
+            authCredentials: {
+                username: username,
+                password: password,
             },
         };
+    };
 
-        chrome.proxy.settings.set({ value: config, scope: "regular" }, () => {
+    // Đăng ký listener trước
+    try {
+        chrome.webRequest.onAuthRequired.removeListener(proxyAuthListener);
+    } catch (err) {
+        // Bỏ qua lỗi nếu không có listener
+    }
+
+    chrome.webRequest.onAuthRequired.addListener(
+        proxyAuthListener,
+        { urls: ["<all_urls>"] },
+        ["blocking"]
+    );
+
+    // Thiết lập proxy config
+    chrome.proxy.settings.set(
+        { value: config, scope: "regular" },
+        () => {
             if (chrome.runtime.lastError) {
                 console.error("Error setting proxy:", chrome.runtime.lastError);
             } else {
                 console.log("Proxy set successfully:", config);
+                currentProxyString = proxyString;
             }
-        });
-
-        // Gán listener vào biến để có thể gỡ sau này
-        proxyAuthListener = (details) => {
-            console.log("Providing auth credentials for proxy");
-            return {
-                authCredentials: {
-                    username: username,
-                    password: password,
-                },
-            };
-        };
-
-        // Đảm bảo không có listener cũ trước khi thêm listener mới
-        try {
-            chrome.webRequest.onAuthRequired.removeListener(proxyAuthListener);
-        } catch (err) {
-            // Bỏ qua lỗi nếu không có listener
+            isSettingProxy = false;
         }
-
-        chrome.webRequest.onAuthRequired.addListener(
-            proxyAuthListener,
-            { urls: ["<all_urls>"] },
-            ["blocking"]
-        );
-    });
+    );
 }
 
 // Tắt proxy và gỡ listener xác thực
@@ -134,16 +142,18 @@ async function initializeProxy() {
     const currentTabURL = url[0].url;
     console.log("Current tab URL:", currentTabURL);
 
-    // Kiểm tra nếu URL là about:blank và có tham số proxy=off
+    // Chỉ thiết lập proxy khi có thay đổi
     if (proxyString === "off") {
-        console.log("Proxy disabled via URL parameter");
-        await disableProxy();
-    } else if (proxyString) {
+        if (currentProxyString !== null) {
+            console.log("Proxy disabled via URL parameter");
+            await disableProxy();
+            currentProxyString = null;
+        }
+    } else if (proxyString && proxyString !== currentProxyString && !isSettingProxy) {
         console.log("Initializing proxy with string:", proxyString);
         setProxy(proxyString);
     } else {
-        console.log("No proxy string found in URL");
-        // Không làm gì nếu không có tham số proxy
+        console.log("No proxy change needed or proxy is being set");
     }
 }
 
@@ -167,7 +177,8 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // Khi tab được cập nhật (để giữ service worker hoạt động và kiểm tra proxy)
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (changeInfo.status === "complete" && tab.active) {
+    if (changeInfo.status === "complete" && tab.active && tab.url && 
+        (tab.url.startsWith("about:blank") || !tab.url.startsWith("chrome://"))) {
         console.log("Tab updated, checking for proxy in URL");
         initializeProxy();
     }
